@@ -23,17 +23,17 @@ mkdir -p images
 MAP=(
   "Screenshot 2026-10-14 184725.png|q1-index-main-event-count.png"
   "Screenshot 2026-10-14 185157.png|q2-user-account-created-alberto.png"
-  "Screenshot 2026-10-14 185134.png|q2-user-account-created-search.png"
-  "Screenshot 2026-10-14 185852.png|q2-user-account-created-event-detail.png"
+  "Screenshot 2026-10-14 185134.png|q2-eventid-4720-query.png"
+  "Screenshot 2026-10-14 185852.png|q2-alberto-search.png"
   "Screenshot 2026-10-14 190044.png|q3-sam-registry-key-sysmon.png"
   "Screenshot 2026-10-14 190719.png|q5-wmic-remote-command-4688.png"
-  "Screenshot 2026-10-14 185913.png|q5-wmic-process-creation-detail.png"
+  "Screenshot 2026-10-14 185913.png|q5-process-creation-detail.png"
   "Screenshot 2026-10-14 190836.png|q7-q8-powershell-operational-79-events.png"
-  "Screenshot 2026-10-14 192237.png|q9-encoded-script-event.png"
+  "Screenshot 2026-10-14 192237.png|q9-encoded-powershell-event.png"
   "Screenshot 2026-10-14 192807.png|q9-encoded-powershell-blob.png"
   "Screenshot 2026-10-14 192755.png|q9-arena-agent-decode.png"
-  "Screenshot 2026-10-14 192022.png|q9-answer-format-incorrect.png"
-  "Screenshot 2026-10-14 192921.png|summary-room-answers.png"
+  "Screenshot 2026-10-14 192022.png|q9-answer-format.png"
+  "Screenshot 2026-10-14 192921.png|room-answers-summary.png"
 )
 
 staged=0
