@@ -1,0 +1,21 @@
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local scratch — a write-up repo should never accumulate these
+*.log
+*.tmp
+.cache/
+
+# Raw session captures stay out of the repository on purpose. Evidence in the
+# write-up is the field value and the query, not a screenshot; keep any
+# captures you take locally rather than committing them.
+Screenshot*.png
+*.png.orig
